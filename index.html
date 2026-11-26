@@ -2752,8 +2752,10 @@ THE SOFTWARE.</pre></details>
     let tainanWeatherStation = null;
     const WENHUI_CAMPUS_REFERENCE = { latitude: 22.984500, longitude: 120.204700, uncertaintyM: 150 }; // approximate campus reference point, not roof survey
     const PV_USABLE_ROOF_FRACTION = 0.40; // 屋頂可配置模組比例，僅為情境設定
-    let solarWeather = { irradiance: 0, clearSkyIrradiance: 0, irradianceCloudAdjusted: true, irradianceObserved: false, temperature: null, airTemperature: null, windSpeed: null, cloud: 0, rain: 0, rainObserved: null, source: '等待臺南站官方觀測資料', cloudEstimated: false, observationTime: null, sunshineDuration: null, stationId: null, stationName: '' };
+    let solarWeather = { irradiance: 0, clearSkyIrradiance: 0, irradianceCloudAdjusted: true, irradianceObserved: false, temperature: null, airTemperature: null, windSpeed: null, windDirection: null, windLevel: null, gustSpeed: null, gustLevel: null, visibilityDescription: null, humidity: null, rh: null, cloud: 0, rain: 0, rainObserved: null, source: '等待臺南站官方觀測資料', cloudEstimated: false, observationTime: null, sunshineDuration: null, weather: '', stationId: null, stationName: '' };
     const CWA_TAINAN_STATION_ID = '467410'; // 歷史資料唯一允許的中央氣象署測站
+    const LAST_SUCCESSFUL_TAINAN_WEATHER_KEY = 'wenhui_cwa_tainan_467410_latest_v1';
+    let tainanWeatherFetchInProgress = false;
     const CWA_TAINAN_PAGE_ID = '46741';
     const CWA_TAINAN_STATION_ADDRESS = '臺南市中西區公園路21號';
     const CWA_TAINAN_STATION_REGISTRY_URL = 'https://hdps.cwa.gov.tw/static/state.html';
@@ -4457,10 +4459,13 @@ THE SOFTWARE.</pre></details>
       const title=$('weatherModalTitle'),note=$('weatherModalNote');
       if(!modal||!grid)return;
       const failed=state==='error';
-      if(title)title.textContent=failed?'臺南站氣象資料讀取失敗':'臺南站最新氣象資料';
+      const retained=state==='retained';
+      if(title)title.textContent=failed?'臺南站氣象資料讀取失敗':retained?'臺南站保留資料（未取得新觀測）':'臺南站最新氣象資料';
       if(note)note.textContent=failed
-        ?'本次未能取得官方觀測資料，畫面以「—」表示；不會以其他測站、舊快取或未標示的估算值替代。風速、陣風及日照欄位的定義，請參考中央氣象署資料說明。'
-        :'風力級數優先顯示臺南站原始風級；只有取得 m/s 風速時才依風速換算。陣風級數依最大瞬間風速換算。當日降水量與本日累計日照時數依測站回傳欄位顯示；日照時數不是即時日射強度。';
+        ?'目前尚無可保留的成功觀測資料，因此暫以「—」表示。本次不會改用其他測站或預設氣象值。'
+        :retained
+          ?'本次官方資料讀取失敗，或官方觀測時間尚未更新。以下完整保留上次成功取得的臺南站資料，不清空、不覆寫，也不改用其他測站或預設值。'
+          :'風力級數優先顯示臺南站原始風級；只有取得 m/s 風速時才依風速換算。陣風級數依最大瞬間風速換算。當日降水量與本日累計日照時數依測站回傳欄位顯示；日照時數不是即時日射強度。';
       // 以九宮格呈現臺南站資料；使用 textContent，避免將外部觀測文字當成 HTML。
       grid.replaceChildren();
       (Array.isArray(metrics)?metrics:[]).slice(0,9).forEach(item=>{
@@ -4470,7 +4475,7 @@ THE SOFTWARE.</pre></details>
         if(item?.unit){const unit=document.createElement('small');unit.textContent=String(item.unit);value.appendChild(unit);}
         card.append(label,value);grid.appendChild(card);
       });
-      if(time)time.textContent=failed?String(timeText||'本次未取得官方觀測資料'):`觀測時間：${timeText||'中央氣象署最新資料'}｜測站：${tainanWeatherStation?`${tainanWeatherStation.name} ${tainanWeatherStation.id}`:'臺南站尚未確認'}`;
+      if(time)time.textContent=(failed||retained)?String(timeText||'本次未取得官方觀測資料'):`觀測時間：${timeText||'中央氣象署最新資料'}｜測站：${tainanWeatherStation?`${tainanWeatherStation.name} ${tainanWeatherStation.id}`:'臺南站尚未確認'}`;
       weatherModalReturnFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;
       modal.classList.add('open');modal.setAttribute('aria-hidden','false');
       const closeButton=modal.querySelector('.weather-modal-close');
@@ -4484,19 +4489,108 @@ THE SOFTWARE.</pre></details>
     }
     document.addEventListener('click',e=>{if(e.target.closest('[data-weather-close]'))closeWeatherModal();});
     document.addEventListener('keydown',e=>{if(e.key==='Escape')closeWeatherModal();});
+    function getRetainedTainanWeatherMetrics(){
+      const w=solarWeather;
+      const air=w.airTemperature;
+      const wind=w.windSpeed;
+      const gust=w.gustSpeed;
+      const humidity=w.humidity;
+      const rain=w.rainObserved;
+      const sunshine=w.sunshineDuration;
+      const windLevel=wind!==null&&wind!==undefined?windBeaufort(Number(wind)):(w.windLevel!==null&&w.windLevel!==undefined?String(w.windLevel):'—');
+      const gustLevel=gust!==null&&gust!==undefined?windBeaufort(Number(gust)):(w.gustLevel!==null&&w.gustLevel!==undefined?String(w.gustLevel):'—');
+      return [
+        {label:'溫度',value:air===null||air===undefined?'—':Number(air).toFixed(1),unit:'°C'},
+        {label:'天氣',value:w.weather||'—'},
+        {label:'風向',value:windDirectionText(w.windDirection)},
+        {label:'風力級數',value:windLevel,unit:'級'},
+        {label:'陣風級數',value:gustLevel,unit:'級'},
+        {label:'能見度',value:w.visibilityDescription||'—',unit:'公里'},
+        {label:'相對濕度',value:humidity===null||humidity===undefined?'—':String(humidity),unit:'%'},
+        {label:'當日降水量',value:rain===null||rain===undefined?'—':Number(rain).toFixed(1),unit:'毫米'},
+        {label:'日照時數',value:sunshine===null||sunshine===undefined?'—':Number(sunshine).toFixed(1),unit:'小時'}
+      ];
+    }
+    function hasSuccessfulTainanWeather(){
+      return solarWeather.stationId===CWA_TAINAN_STATION_ID && Number.isFinite(Date.parse(solarWeather.observationTime||''));
+    }
+    function persistSuccessfulTainanWeather(){
+      try{
+        const snapshot={
+          version:1,stationId:solarWeather.stationId,stationName:solarWeather.stationName,
+          observationTime:solarWeather.observationTime,irradiance:solarWeather.irradiance,
+          clearSkyIrradiance:solarWeather.clearSkyIrradiance,temperature:solarWeather.temperature,
+          airTemperature:solarWeather.airTemperature,windSpeed:solarWeather.windSpeed,
+          windDirection:solarWeather.windDirection,windLevel:solarWeather.windLevel,
+          gustSpeed:solarWeather.gustSpeed,gustLevel:solarWeather.gustLevel,
+          visibilityDescription:solarWeather.visibilityDescription,humidity:solarWeather.humidity,
+          rh:solarWeather.rh,cloud:solarWeather.cloud,rain:solarWeather.rain,
+          rainObserved:solarWeather.rainObserved,sunshineDuration:solarWeather.sunshineDuration,
+          weather:solarWeather.weather,stationDistanceM:solarWeather.stationDistanceM
+        };
+        localStorage.setItem(LAST_SUCCESSFUL_TAINAN_WEATHER_KEY,JSON.stringify(snapshot));
+      }catch(error){console.warn('臺南站最新成功資料無法寫入本機保留區；目前畫面資料仍保留。',error);}
+    }
+    function restoreLastSuccessfulTainanWeather(){
+      try{
+        const raw=localStorage.getItem(LAST_SUCCESSFUL_TAINAN_WEATHER_KEY);
+        // 升級自舊版時若尚未建立最新資料快照，僅從本機已保存的「臺南站官方觀測列」還原最近一筆，且必須在 60 分鐘內。
+        if(!raw){
+          const cached=Array.isArray(tainanHistoryRows)?tainanHistoryRows.filter(isValidTainanHistoryRecord).slice().sort((a,b)=>a.timestamp-b.timestamp).at(-1):null;
+          if(!cached)return false;
+          const ageMinutes=(Date.now()-cached.timestamp)/60000;
+          if(ageMinutes < -10 || ageMinutes > 60)return false;
+          const observedAt=new Date(cached.timestamp);
+          const cloud=estimateCloudFromWeather(cached.weather);
+          const clearSkyIrradiance=estimateSolarIrradiance(0,observedAt);
+          const irradiance=estimateSolarIrradiance(cloud,observedAt);
+          if(![cloud,clearSkyIrradiance,irradiance].every(Number.isFinite))return false;
+          const distance=haversineMeters(WENHUI_CAMPUS_REFERENCE.latitude,WENHUI_CAMPUS_REFERENCE.longitude,TAINAN_STATION_REFERENCE.latitude,TAINAN_STATION_REFERENCE.longitude);
+          tainanWeatherStation={id:TAINAN_STATION_REFERENCE.id,name:TAINAN_STATION_REFERENCE.name,latitude:TAINAN_STATION_REFERENCE.latitude,longitude:TAINAN_STATION_REFERENCE.longitude,address:TAINAN_STATION_REFERENCE.address,sourceDatum:'WGS84（中央氣象署測站清冊）',coordinateTransformed:false,distanceM:distance,observationTime:cached.dateTime,campusLatitude:WENHUI_CAMPUS_REFERENCE.latitude,campusLongitude:WENHUI_CAMPUS_REFERENCE.longitude,coordinateUncertaintyM:WENHUI_CAMPUS_REFERENCE.uncertaintyM};
+          solarWeather={...solarWeather,irradiance,clearSkyIrradiance,irradianceCloudAdjusted:true,irradianceObserved:false,temperature:cached.airTemperature,airTemperature:cached.airTemperature,windSpeed:cached.windSpeed,windDirection:cached.windDirection,windLevel:cached.windLevel,gustSpeed:cached.gustSpeed,gustLevel:cached.gustLevel,visibilityDescription:cached.visibilityDescription,humidity:cached.humidity,rh:cached.humidity,cloud,rain:Math.max(0,cached.rain??0),rainObserved:cached.rain,sunshineDuration:cached.sunshineDuration,weather:cached.weather,observationTime:cached.dateTime,cloudEstimated:true,stationId:CWA_TAINAN_STATION_ID,stationName:TAINAN_STATION_REFERENCE.name,stationDistanceM:distance,source:`中央氣象署臺南站 ${TAINAN_STATION_REFERENCE.name}（${CWA_TAINAN_STATION_ID}）本機保存的上次有效觀測`};
+          persistSuccessfulTainanWeather();
+          return true;
+        }
+        const saved=JSON.parse(raw);
+        const timestamp=Date.parse(saved?.observationTime||'');
+        const optionalNumber=(v,min,max)=>v===null||v===undefined||v===''||(Number.isFinite(Number(v))&&Number(v)>=min&&Number(v)<=max);
+        const valid=saved?.version===1&&saved.stationId===CWA_TAINAN_STATION_ID&&Number.isFinite(timestamp)
+          &&Boolean(String(saved.weather||'').trim())&&!/^(—|－|-|X|T|-99|N\/?A)$/i.test(String(saved.weather).trim())
+          &&optionalNumber(saved.airTemperature,-20,50)&&optionalNumber(saved.windSpeed,0,80)
+          &&optionalNumber(saved.humidity,0,100)&&optionalNumber(saved.rain,0,10000)
+          &&optionalNumber(saved.sunshineDuration,0,24)
+          &&Number.isFinite(Number(saved.irradiance))&&Number(saved.irradiance)>=0&&Number(saved.irradiance)<=1100
+          &&Number.isFinite(Number(saved.clearSkyIrradiance))&&Number(saved.clearSkyIrradiance)>=0&&Number(saved.clearSkyIrradiance)<=1100;
+        if(!valid)return false;
+        const distance=haversineMeters(WENHUI_CAMPUS_REFERENCE.latitude,WENHUI_CAMPUS_REFERENCE.longitude,TAINAN_STATION_REFERENCE.latitude,TAINAN_STATION_REFERENCE.longitude);
+        tainanWeatherStation={id:TAINAN_STATION_REFERENCE.id,name:TAINAN_STATION_REFERENCE.name,latitude:TAINAN_STATION_REFERENCE.latitude,longitude:TAINAN_STATION_REFERENCE.longitude,address:TAINAN_STATION_REFERENCE.address,sourceDatum:'WGS84（中央氣象署測站清冊）',coordinateTransformed:false,distanceM:distance,observationTime:saved.observationTime,campusLatitude:WENHUI_CAMPUS_REFERENCE.latitude,campusLongitude:WENHUI_CAMPUS_REFERENCE.longitude,coordinateUncertaintyM:WENHUI_CAMPUS_REFERENCE.uncertaintyM};
+        solarWeather={
+          ...solarWeather,...saved,irradiance:Number(saved.irradiance),clearSkyIrradiance:Number(saved.clearSkyIrradiance),
+          cloud:Number(saved.cloud),rain:Number(saved.rain??0),rainObserved:saved.rainObserved??saved.rain??null,
+          source:`中央氣象署臺南站 ${TAINAN_STATION_REFERENCE.name}（${CWA_TAINAN_STATION_ID}）上次成功觀測資料`,
+          cloudEstimated:true,irradianceCloudAdjusted:true,irradianceObserved:false,
+          stationId:CWA_TAINAN_STATION_ID,stationName:TAINAN_STATION_REFERENCE.name
+        };
+        return true;
+      }catch(error){console.warn('無法讀取臺南站上次成功資料；保留目前頁面預設狀態。',error);return false;}
+    }
     async function fetchTainanWeather(showModal = true){
-      const status=$('weatherStatus');if(!status)return;
-      daySimState.runId++;daySimState.active=false;daySimState.running=false;daySimState.paused=false;daySimState.completed=false;daySimState.historyMode=false;syncPauseBtn();applyFlowVisibility();
-      // 更新期間先清除上一筆測站識別，避免連線失敗時舊值仍被顯示為最新資料。
-      solarWeather={...solarWeather,stationId:null,stationName:'',observationTime:null,irradiance:0,clearSkyIrradiance:0,airTemperature:null,temperature:null,windSpeed:null,sunshineDuration:null,weather:'',cloud:0,source:'等待臺南站官方觀測資料'};
-      updateSimulation();
-      status.textContent='正在讀取中央氣象署臺南站（467410）最新可用觀測資料……';
+      const status=$('weatherStatus');if(!status)return false;
+      // 每分鐘輪詢可能遇到慢速網路；禁止同時發出多筆更新，避免較晚完成的舊請求覆蓋新資料。
+      if(tainanWeatherFetchInProgress)return false;
+      tainanWeatherFetchInProgress=true;
+      // 讀取期間完全不動目前畫面與近 12 小時模擬；若模擬播放中，以播放前保存的官方資料作為新舊時間比較基準。
+      const baselineWeather=daySimState.savedWeather?{...daySimState.savedWeather}:{...solarWeather};
+      const previousObservationTime=baselineWeather.observationTime;
+      const hadPreviousData=baselineWeather.stationId===CWA_TAINAN_STATION_ID&&Number.isFinite(Date.parse(previousObservationTime||''));
+      status.textContent=hadPreviousData
+        ?`正在檢查中央氣象署臺南站（467410）最新資料；目前保留上次有效觀測時間 ${previousObservationTime}……`
+        :'正在讀取中央氣象署臺南站（467410）最新可用觀測資料……';
       ['weatherFetchDay'].forEach(id=>{const b=$(id);if(b){b.disabled=true;b.textContent='資料更新中…';}});
       try{
         let currentPageRows = [], currentPageError = '';
         try {
-          // OBS_Station 主頁的觀測表由 JavaScript 動態載入；直接抓取頁面外殼再用歷史表格解析器
-          // 會拿不到資料，並白白耗掉一次逾時。改讀主頁明確連結的同站 24 小時原始表，取最新一筆。
+          // 唯一來源：中央氣象署臺南站官方過去 24 小時原始觀測表。
           const latestResponse = await fetchCwaTextWithFallback(CWA_TAINAN_HISTORY_URL, 9000, text => {
             try { return parseOfficialTainanHistoryTable(text).some(isValidTainanHistoryRecord); } catch { return false; }
           }, 'history');
@@ -4504,89 +4598,97 @@ THE SOFTWARE.</pre></details>
         } catch (latestError) {
           currentPageError = latestError?.message || '臺南站官方過去 24 小時觀測表未回傳可解析資料';
         }
-        // 最新氣象視窗與 12 小時模擬共用臺南站官方 24 小時原始表；不先解析動態主頁，也不重複請求同一資料。
         const candidates = currentPageRows.filter(isValidTainanHistoryRecord);
         if(!candidates.length) throw new Error(currentPageError || '臺南站官方過去 24 小時觀測表沒有可讀取的資料列');
         const latest=candidates.slice().sort((a,b)=>b.timestamp-a.timestamp)[0];
         if(!latest || latest.stationId!==CWA_TAINAN_STATION_ID) throw new Error('官方最新資料不是臺南站（467410）');
+        const observationTime=latest.dateTime;
+        const observationDate=new Date(latest.timestamp);
+        if(!Number.isFinite(observationDate.getTime()))throw new Error('臺南站觀測時間欄位無效，無法計算太陽仰角與日射輸入');
+        const observationAgeMinutes=(Date.now()-latest.timestamp)/60000;
+        if(observationAgeMinutes < -10 || observationAgeMinutes > 60) throw new Error(`臺南站最新資料時間與目前時間相差 ${Math.round(observationAgeMinutes)} 分鐘，超出允許範圍（未來 10 分鐘至過去 60 分鐘）；保留上一筆有效資料，不覆寫`);
+        const weather=String(latest.weather||'').trim();
+        const weatherValid=Boolean(weather)&&!/^(—|－|-|X|T|-99|N\/?A)$/i.test(weather);
+        if(!weatherValid)throw new Error('臺南站最新紀錄缺少有效天氣現象，保留上一筆有效資料，不覆寫');
+        const inRange=(value,min,max)=>value===null||value===undefined||(Number.isFinite(Number(value))&&Number(value)>=min&&Number(value)<=max);
+        if(!inRange(latest.airTemperature,-20,50)||!inRange(latest.windSpeed,0,80)||!inRange(latest.humidity,0,100)||!inRange(latest.rain,0,10000)||!inRange(latest.sunshineDuration,0,24)||!inRange(latest.gustSpeed,0,100)){
+          throw new Error('臺南站新紀錄含超出合理範圍的數值，整筆資料不採用並保留上一筆有效資料');
+        }
+        // 僅接受觀測時間嚴格晚於目前資料的紀錄；時間相同或倒退，一律保留全部原值。
+        const previousTimestamp=Date.parse(previousObservationTime||'');
+        if(Number.isFinite(previousTimestamp)&&latest.timestamp<=previousTimestamp){
+          const message=`已重新檢查中央氣象署臺南站（467410）；官方觀測時間尚未更新（上次成功觀測時間仍為 ${previousObservationTime}），所有原資料與目前模擬狀態均完整保留，未覆寫。`;
+          status.textContent=message;
+          if(showModal&&hadPreviousData)showWeatherModal(getRetainedTainanWeatherMetrics(),`最後成功觀測時間：${previousObservationTime}｜官方尚未發布較新的觀測資料`,'retained');
+          return true;
+        }
         const latestSourceLabel = '臺南站官方過去 24 小時觀測表（取最新一筆）';
         const distance=haversineMeters(WENHUI_CAMPUS_REFERENCE.latitude,WENHUI_CAMPUS_REFERENCE.longitude,TAINAN_STATION_REFERENCE.latitude,TAINAN_STATION_REFERENCE.longitude);
-        tainanWeatherStation={id:TAINAN_STATION_REFERENCE.id,name:TAINAN_STATION_REFERENCE.name,latitude:TAINAN_STATION_REFERENCE.latitude,longitude:TAINAN_STATION_REFERENCE.longitude,address:TAINAN_STATION_REFERENCE.address,sourceDatum:'WGS84（中央氣象署測站清冊）',coordinateTransformed:false,distanceM:distance,observationTime:latest.dateTime,campusLatitude:WENHUI_CAMPUS_REFERENCE.latitude,campusLongitude:WENHUI_CAMPUS_REFERENCE.longitude,coordinateUncertaintyM:WENHUI_CAMPUS_REFERENCE.uncertaintyM};
-        const obs={StationId:latest.stationId,DateTime:latest.dateTime,AirTemperature:latest.airTemperature,Precipitation:latest.rain,RelativeHumidity:latest.humidity,WindDirection:latest.windDirection,WindSpeed:latest.windSpeed,WindScale:latest.windLevel,PeakGustSpeed:latest.gustSpeed,VisibilityDescription:latest.visibilityDescription,Weather:latest.weather,SunshineDuration:latest.sunshineDuration};
+        const candidateStation={id:TAINAN_STATION_REFERENCE.id,name:TAINAN_STATION_REFERENCE.name,latitude:TAINAN_STATION_REFERENCE.latitude,longitude:TAINAN_STATION_REFERENCE.longitude,address:TAINAN_STATION_REFERENCE.address,sourceDatum:'WGS84（中央氣象署測站清冊）',coordinateTransformed:false,distanceM:distance,observationTime:observationTime,campusLatitude:WENHUI_CAMPUS_REFERENCE.latitude,campusLongitude:WENHUI_CAMPUS_REFERENCE.longitude,coordinateUncertaintyM:WENHUI_CAMPUS_REFERENCE.uncertaintyM};
         const air=latest.airTemperature;
         const rain=latest.rain;
         const humidity=latest.humidity;
         const windSpeed=latest.windSpeed;
-        const weather=String(latest.weather||'').trim();
-        const sunshine=latest.sunshineDuration;
-        const observationTime=latest.dateTime;
-        const observationDate=new Date(observationTime);
-        if(!Number.isFinite(observationDate.getTime()))throw new Error('臺南站觀測時間欄位無效，無法計算太陽仰角與日射輸入');
-        const observationAgeMinutes=(Date.now()-observationDate.getTime())/60000;
-        if(observationAgeMinutes < -10 || observationAgeMinutes > 60) throw new Error(`臺南站最新資料時間與目前時間相差 ${Math.round(observationAgeMinutes)} 分鐘，超出允許範圍（未來 10 分鐘至過去 60 分鐘）；不將過舊或時間異常資料標示為最新觀測`);
-        // 氣溫或風速缺值時仍保留同站時間與天氣資料；NOCT 溫度修正會自動停用，不補入預設值。
-        const weatherValid=Boolean(weather)&&!/^(—|－|-|X|T|-99|N\/?A)$/i.test(weather);
-        if(!weatherValid)throw new Error('臺南站最新紀錄缺少有效天氣現象，無法依指定公式計算日射輸入');
-        // 日照時數只作為臺南站觀測指標；GHI 依同站天氣現象與太陽位置公式計算。
+        // GHI 依同站天氣現象與觀測時間公式計算；不混入其他測站或外部日射資料。
         const cloud=estimateCloudFromWeather(weather);
         const clearSkyIrradiance=estimateSolarIrradiance(0,observationDate);
         const irradiance=estimateSolarIrradiance(cloud,observationDate);
+        if(![cloud,clearSkyIrradiance,irradiance].every(Number.isFinite))throw new Error('臺南站資料衍生計算未通過數值檢查，保留上一筆有效資料');
         const historyRecord=normalizeHistoryRecord({
-          StationId:tainanWeatherStation.id, DateTime:observationTime, Weather:weather,
+          StationId:TAINAN_STATION_REFERENCE.id, DateTime:observationTime, Weather:weather,
           AirTemperature:air, WindDirection:latest.windDirection, WindSpeed:windSpeed,
           WindScale:latest.windLevel, PeakGustSpeed:latest.gustSpeed, PeakGustScale:latest.gustLevel,
           VisibilityDescription:latest.visibilityDescription, RelativeHumidity:humidity,
-          Precipitation:rain, SunshineDuration:sunshine, GHI10minWm2:null
+          Precipitation:rain, SunshineDuration:latest.sunshineDuration, GHI10minWm2:null
         });
-        if(historyRecord)saveTainanHistoryRecord(historyRecord);
-        const airTemp=air;
-        const wind=windSpeed;
-        solarWeather={
+        if(!historyRecord)throw new Error('臺南站新紀錄未通過完整資料正規化檢查，保留上一筆有效資料');
+        const nextSolarWeather={
           irradiance,clearSkyIrradiance,irradianceCloudAdjusted:true,irradianceObserved:false,
-          temperature:airTemp,airTemperature:airTemp,windSpeed:wind,humidity,rh:humidity,
-          cloud,rain:Math.max(0,rain??0),rainObserved:rain,sunshineDuration:sunshine,
-          source:`中央氣象署臺南站 ${tainanWeatherStation.name}（${tainanWeatherStation.id}）天氣現象與觀測時間公式計算`,
+          temperature:air,airTemperature:air,windSpeed:windSpeed,
+          windDirection:latest.windDirection,windLevel:latest.windLevel,
+          gustSpeed:latest.gustSpeed,gustLevel:latest.gustLevel,
+          visibilityDescription:latest.visibilityDescription,
+          humidity,rh:humidity,cloud,rain:Math.max(0,rain??0),rainObserved:rain,
+          sunshineDuration:latest.sunshineDuration,
+          source:`中央氣象署臺南站 ${TAINAN_STATION_REFERENCE.name}（${TAINAN_STATION_REFERENCE.id}）天氣現象與觀測時間公式計算`,
           weather,observationTime,cloudEstimated:true,
-          stationId:tainanWeatherStation.id,stationName:tainanWeatherStation.name,stationDistanceM:tainanWeatherStation.distanceM
+          stationId:TAINAN_STATION_REFERENCE.id,stationName:TAINAN_STATION_REFERENCE.name,stationDistanceM:distance
         };
-        // 歷史氣候格點資料不再混入本次即時模擬；所有氣象輸入只來自臺南站。
+        // 到此才允許改動畫面狀態：只有新資料完整通過讀取、解析、站號、時間與數值驗證後，才結束舊模擬並提交新資料。
+        daySimState.runId++;daySimState.active=false;daySimState.running=false;daySimState.paused=false;daySimState.completed=false;daySimState.manualSeek=false;daySimState.historyMode=false;daySimState.savedWeather=null;
+        daySimState.currentIrradiance=irradiance;
+        syncPauseBtn();applyFlowVisibility();
+        // 原子式提交：只有新觀測時間較新且整筆資料通過驗證後，才替換站點與所有氣象值。
+        tainanWeatherStation=candidateStation;
+        solarWeather=nextSolarWeather;
+        saveTainanHistoryRecord(historyRecord);
+        persistSuccessfulTainanWeather();
         updateSimulation();updateVisuals();updateSolve();updateROI();
         const result=energyData.solar.calculate(getValues('solar'));
         const timeText=solarWeather.observationTime||'氣象署最新資料';
         const station=tainanWeatherStation;
         const irradianceSource='臺南站天氣現象與太陽位置公式計算（非直接日射觀測）';
         status.textContent=`臺南站 ${station.name}（${station.id}），距校區約 ${(station.distanceM/1000).toFixed(2)} km｜${timeText}｜資料來源：${latestSourceLabel}｜氣溫 ${air===null?'—':air.toFixed(1)+'°C'}、濕度 ${humidity!==null?humidity+'%':'缺值'}、風速 ${windSpeed===null?'—':windSpeed.toFixed(1)+' m/s'}、降水 ${rain!==null?rain+' mm':'缺值'}、${weather||'天氣未提供'}｜水平面 GHI ${irradiance.toFixed(0)} W/m²（${irradianceSource}）｜模組面 POA ${result.poa.toFixed(0)} W/m²｜文薈樓 AC 模型輸出 ${result.power.toFixed(2)} kW；近 10 分鐘區間電量 ${(result.power*10/60).toFixed(3)} kWh（非案場電表實測）${result.moduleTemp===null?'；因臺南站氣溫或 m/s 風速缺值，本次未套用 NOCT 溫度修正':''}`;
-        if(showModal){
-          const direction=latest.windDirection;
-          const gust=latest.gustSpeed;
-          const visibility=latest.visibilityDescription || '—';
-          const sunshineValue=sunshine===null?'—':sunshine.toFixed(1);
-          const windLevelValue=windSpeed!==null?windBeaufort(windSpeed):(latest.windLevel!==null&&latest.windLevel!==undefined?String(latest.windLevel):'—');
-          const gustLevelValue=gust!==null&&gust!==undefined?windBeaufort(gust):(latest.gustLevel!==null&&latest.gustLevel!==undefined?String(latest.gustLevel):'—');
-          showWeatherModal([
-            {label:'溫度',value:air===null?'—':air.toFixed(1),unit:'°C'},
-            {label:'天氣',value:weather||'—'},
-            {label:'風向',value:windDirectionText(direction)},
-            {label:'風力級數',value:windLevelValue,unit:'級'},
-            {label:'陣風級數',value:gustLevelValue,unit:'級'},
-            {label:'能見度',value:visibility,unit:'公里'},
-            {label:'相對濕度',value:humidity===null?'—':humidity,unit:'%'},
-            {label:'當日降水量',value:rain===null?'—':rain.toFixed(1),unit:'毫米'},
-            {label:'日照時數',value:sunshineValue,unit:'小時'}
-          ],`${timeText}｜${station.name} ${station.id}`);
-        }
+        if(showModal)showWeatherModal(getRetainedTainanWeatherMetrics(),`${timeText}｜${station.name} ${station.id}`);
         return true;
       }catch(error){
-        // 失敗時清除測站識別與前次數值，首頁指標維持「—」，不以舊值冒充最新觀測。
-        solarWeather={...solarWeather,stationId:null,stationName:'',observationTime:null,irradiance:0,clearSkyIrradiance:0,airTemperature:null,temperature:null,windSpeed:null,sunshineDuration:null,weather:'',cloud:0,source:'臺南站資料未取得'};
-        updateSimulation();
-        status.textContent='目前無法取得中央氣象署臺南站（467410）官方觀測資料；不會沿用前次資料或預設氣象值，也不會改用其他測站。請稍後重新更新。（錯誤：'+(error&&error.message?error.message:'未知')+'）';
-        if(showModal){
-          const labels=['溫度','天氣','風向','風力','陣風','能見度','相對濕度','當日降水量','日照時數'];
-          showWeatherModal(labels.map(l=>({label:l,value:'—'})),'讀取失敗：'+(error&&error.message?error.message:'網路或跨來源限制')+'。未使用其他測站或估算值。','error');
+        // 讀取、解析、驗證任一階段失敗，都不修改 solarWeather／tainanWeatherStation，也不觸發模型重算。
+        const detail=error&&error.message?error.message:'未知錯誤';
+        if(hadPreviousData){
+          status.textContent=`臺南站（467410）本次讀取失敗，已保留上次成功資料及觀測時間 ${previousObservationTime}，畫面數值、模型與目前模擬狀態均未變更。系統會在下一次檢查重試。（錯誤：${detail}）`;
+          if(showModal)showWeatherModal(getRetainedTainanWeatherMetrics(),`最後成功觀測時間：${previousObservationTime}｜本次讀取失敗，已保留原資料。${detail}`,'retained');
+        }else{
+          status.textContent=`目前尚未取得中央氣象署臺南站（467410）有效資料；本次讀取失敗，沒有可保留的舊資料。未使用其他測站或預設值，系統會於下一次檢查重試。（錯誤：${detail}）`;
+          if(showModal){
+            const labels=['溫度','天氣','風向','風力','陣風','能見度','相對濕度','當日降水量','日照時數'];
+            showWeatherModal(labels.map(l=>({label:l,value:'—'})),`尚無成功觀測資料｜本次讀取失敗：${detail}`,'error');
+          }
         }
         return false;
-      }finally{['weatherFetchDay'].forEach(id=>{const b=$(id);if(b){b.disabled=false;b.textContent='更新臺南站最新氣象資料';}});}
+      }finally{
+        tainanWeatherFetchInProgress=false;
+        ['weatherFetchDay'].forEach(id=>{const b=$(id);if(b){b.disabled=false;b.textContent='更新臺南站最新氣象資料';}});
+      }
     }
     ['capexInput','tariffInput','omInput'].forEach(id=>$(id)?.addEventListener('input',updateROI));
     $('weatherFetchDay')?.addEventListener('click',()=>fetchTainanWeather(true));
@@ -4780,6 +4882,8 @@ THE SOFTWARE.</pre></details>
       renderer.render(scene, camera);
     }
 
+    // 重新開啟頁面時，先還原上次成功驗證的臺南站資料；新資料只有在觀測時間更新且整筆驗證通過後才能取代。
+    restoreLastSuccessfulTainanWeather();
     // 初始展區 / Initial exhibition
     ['wind', 'hydro', 'bio', 'geo', 'ocean'].forEach(k => delete energyData[k]);
     renderNavigation(); updateContent(activeEnergy); createExhibit(activeEnergy); resizeRenderer(); updateVisuals(); animate();
@@ -4787,7 +4891,7 @@ THE SOFTWARE.</pre></details>
     window.setTimeout(() => fetchTainanWeather(false), 650);
     window.setInterval(() => {
       if (document.visibilityState === 'visible' && !daySimState.active && !daySimState.running && !daySimState.paused) fetchTainanWeather(false);
-    }, 10 * 60 * 1000);
+    }, 60 * 1000);
 
     // 頁面離開時釋放資源 / Release GPU resources when leaving the page
     window.addEventListener('beforeunload', () => {
